@@ -662,7 +662,7 @@ class KohonenAdvancedAnalyzer:
         plt.savefig('kohonen_activation_enhanced.png', dpi=300, bbox_inches='tight')
         plt.close()
 
-    def _create_natural_clusters(self, som, data, density_threshold=0.7):
+    def _create_natural_clusters(self, som, data, density_threshold=0.3):
         """Cria clusters naturais baseados em densidade no SOM (SEM K-MEANS)"""
         print("   🎯 Identificando clusters naturais baseados em densidade...")
 
