@@ -1,219 +1,570 @@
 """
-Módulo de interpretação de clusters
+Módulo avançado de interpretação de clusters para SOM (Self-Organizing Maps)
+Versão melhorada com análises mais robustas e visualizações detalhadas
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import logging
+from typing import Dict, Tuple, Optional, Any
+from scipy import stats
 from analysis.cluster_evaluator import ClusterQualityEvaluator
+
+# Configuração de estilo para visualizações
+plt.style.use('default')
+sns.set_palette("husl")
 
 logger = logging.getLogger(__name__)
 
-class SOMClusterInterpreter:
-    """Interpretador de clusters baseado apenas no SOM (SEM K-MEANS)"""
-
+class AdvancedSOMClusterInterpreter:
+    """Interpretador avançado de clusters baseado em SOM com análises detalhadas"""
+    
     def __init__(self, preprocessor, som_trainer, som_analyzer):
         self.preprocessor = preprocessor
         self.som_trainer = som_trainer
         self.som_analyzer = som_analyzer
         self.cluster_profiles = {}
         self.quality_evaluator = ClusterQualityEvaluator()
+        self.feature_names = None
 
-    def analyze_som_clusters(self, X, original_df, max_clusters=15, min_cluster_size_ratio=0.01):
-        """Analisa clusters baseados apenas no SOM com balanceamento"""
-        logger.info("🔍 ANÁLISE DE CLUSTERS DO SOM (SEM K-MEANS)")
-
+    def analyze_som_clusters(self, X, original_df, max_clusters=15, 
+                           min_cluster_size_ratio=0.01, 
+                           noise_threshold=0.05) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Analisa clusters baseados no SOM com balanceamento avançado
+        
+        Args:
+            X: DataFrame com features
+            original_df: DataFrame original com dados completos
+            max_clusters: Número máximo de clusters
+            min_cluster_size_ratio: Razão mínima do tamanho do cluster
+            noise_threshold: Threshold para considerar como ruído
+            
+        Returns:
+            Tuple com DataFrame enriquecido e métricas de qualidade
+        """
+        logger.info("🔍 ANÁLISE AVANÇADA DE CLUSTERS DO SOM")
+        
         if self.som_trainer.som is None:
             raise ValueError("Rede de Kohonen não treinada!")
 
+        # Preparação dos dados
         data = X.values.astype(np.float32)
+        self.feature_names = X.columns.tolist()
 
         # Obter clusters naturais do SOM
         neuron_clusters = self.som_analyzer.get_neuron_clusters()
-
         if neuron_clusters is None:
             raise ValueError("Clusters naturais não foram calculados!")
 
-        # Mapear pontos para clusters com balanceamento
-        balanced_clusters = self._balance_cluster_assignment(
-            self.som_trainer.som, data, neuron_clusters,
-            max_clusters, min_cluster_size_ratio
+        # Atribuição balanceada de clusters
+        balanced_clusters, cluster_metrics = self._advanced_cluster_assignment(
+            data, neuron_clusters, max_clusters, 
+            min_cluster_size_ratio, noise_threshold
         )
 
-        # Adicionar clusters ao DataFrame original
-        original_df = original_df.iloc[:len(balanced_clusters)].copy()
-        original_df['CLUSTER_SOM'] = balanced_clusters
+        # Preparar DataFrame final
+        result_df = self._prepare_result_dataframe(original_df, balanced_clusters)
+        
+        # Análises completas
+        quality_metrics = self._comprehensive_analysis(result_df, data, balanced_clusters)
+        
+        return result_df, {**quality_metrics, **cluster_metrics}
 
-        # Avaliar qualidade dos clusters
-        quality_metrics = self.quality_evaluator.comprehensive_cluster_quality(
-            data, balanced_clusters, self.som_trainer.som
+    def _advanced_cluster_assignment(self, data, neuron_clusters, max_clusters, 
+                                   min_cluster_size_ratio, noise_threshold):
+        """Atribuição avançada de clusters com múltiplas estratégias"""
+        logger.info("   ⚖️  Atribuição avançada de clusters...")
+        
+        som = self.som_trainer.som
+        neuron_cluster_map = self._create_neuron_cluster_map(neuron_clusters)
+        
+        # Atribuição inicial
+        initial_assignments = self._get_initial_assignments(som, data, neuron_cluster_map)
+        
+        # Análise da distribuição inicial
+        cluster_stats = self._analyze_initial_distribution(initial_assignments)
+        
+        # Estratégias de balanceamento
+        balanced_assignments = self._apply_balancing_strategies(
+            initial_assignments, cluster_stats, len(data), 
+            max_clusters, min_cluster_size_ratio, noise_threshold
         )
+        
+        # Métricas do processo
+        cluster_metrics = {
+            'initial_clusters': len(cluster_stats['valid_clusters']),
+            'final_clusters': len(np.unique(balanced_assignments)) - 1,  # Excluir ruído
+            'noise_points': np.sum(np.array(balanced_assignments) == 0),
+            'retained_data_ratio': np.sum(np.array(balanced_assignments) > 0) / len(data)
+        }
+        
+        logger.info(f"   ✅ Balanceamento concluído: {cluster_metrics['final_clusters']} clusters")
+        
+        return balanced_assignments, cluster_metrics
 
-        # Análise de distribuição
-        self._analyze_cluster_distribution(original_df)
-
-        # Análise detalhada por cluster
-        self._analyze_cluster_characteristics(original_df)
-
-        return original_df, quality_metrics
-
-    def _balance_cluster_assignment(self, som, data, neuron_clusters, max_clusters, min_cluster_size_ratio):
-        """Balanceia a atribuição de clusters para evitar desbalanceamento"""
-        logger.info("   ⚖️  Balanceando atribuição de clusters...")
-
-        # Contar pontos por neurônio inicialmente
-        initial_assignments = []
+    def _create_neuron_cluster_map(self, neuron_clusters):
+        """Cria mapeamento neurônio -> cluster"""
         neuron_cluster_map = {}
-
-        # Criar mapeamento neurônio -> cluster
         for i in range(neuron_clusters.shape[0]):
             for j in range(neuron_clusters.shape[1]):
                 cluster_id = neuron_clusters[i, j]
-                if cluster_id > 0:  # Ignorar background (cluster 0)
+                if cluster_id > 0:
                     neuron_cluster_map[(i, j)] = cluster_id
+        return neuron_cluster_map
 
-        # Atribuição inicial
+    def _get_initial_assignments(self, som, data, neuron_cluster_map):
+        """Obtém atribuições iniciais dos clusters"""
+        assignments = []
         for sample in data:
             winner = som.winner(sample)
             cluster_id = neuron_cluster_map.get(winner, 0)
-            initial_assignments.append(cluster_id)
+            assignments.append(cluster_id)
+        return assignments
 
-        # Analisar distribuição inicial
-        unique_clusters, counts = np.unique(initial_assignments, return_counts=True)
-        total_points = len(data)
-
-        logger.info(f"   📊 Distribuição inicial: {len(unique_clusters)} clusters")
-
-        # Balancear clusters muito pequenos ou muito grandes
-        balanced_assignments = self._redistribute_clusters(
-            initial_assignments, counts, total_points,
-            max_clusters, min_cluster_size_ratio
-        )
-
-        return balanced_assignments
-
-    def _redistribute_clusters(self, assignments, counts, total_points, max_clusters, min_cluster_size_ratio):
-        """Redistribui pontos para balancear clusters"""
-        min_cluster_size = int(total_points * 0.005)  # 0.5% do total
-
-        # Identificar clusters válidos (acima do tamanho mínimo)
+    def _analyze_initial_distribution(self, assignments):
+        """Analisa distribuição inicial dos clusters"""
+        assignments_array = np.array(assignments)
+        unique_clusters, counts = np.unique(assignments_array, return_counts=True)
+        
         valid_clusters = []
         cluster_sizes = {}
+        
+        for cluster_id, count in zip(unique_clusters, counts):
+            cluster_sizes[cluster_id] = count
+            if cluster_id > 0:  # Excluir cluster 0 (ruído)
+                valid_clusters.append(cluster_id)
+        
+        return {
+            'unique_clusters': unique_clusters,
+            'counts': counts,
+            'valid_clusters': valid_clusters,
+            'cluster_sizes': cluster_sizes
+        }
 
-        for cluster_id in np.unique(assignments):
-            if cluster_id == 0:
-                continue  # Pular cluster de background
-
-            cluster_mask = np.array(assignments) == cluster_id
-            cluster_size = np.sum(cluster_mask)
-            cluster_sizes[cluster_id] = cluster_size
-
+    def _apply_balancing_strategies(self, assignments, cluster_stats, total_points,
+                                  max_clusters, min_cluster_size_ratio, noise_threshold):
+        """Aplica múltiplas estratégias de balanceamento"""
+        min_cluster_size = int(total_points * min_cluster_size_ratio)
+        assignments_array = np.array(assignments)
+        
+        # Identificar clusters válidos
+        valid_clusters = []
+        for cluster_id in cluster_stats['valid_clusters']:
+            cluster_size = cluster_stats['cluster_sizes'][cluster_id]
             if cluster_size >= min_cluster_size:
                 valid_clusters.append(cluster_id)
-
+        
         # Limitar número máximo de clusters
         if len(valid_clusters) > max_clusters:
-            # Manter os maiores clusters
-            valid_clusters = sorted(valid_clusters,
-                                    key=lambda x: cluster_sizes[x],
-                                    reverse=True)[:max_clusters]
-
-        # Reatribuir pontos de clusters inválidos para o cluster mais próximo válido
+            valid_clusters = sorted(
+                valid_clusters,
+                key=lambda x: cluster_stats['cluster_sizes'][x],
+                reverse=True
+            )[:max_clusters]
+        
+        # Reatribuir pontos
         balanced_assignments = []
         for assignment in assignments:
             if assignment == 0 or assignment not in valid_clusters:
-                # Reatribuir para cluster válido mais próximo (ou manter como 0)
-                balanced_assignments.append(0)  # Ou implementar lógica de reassociação
+                # Pode-se implementar reassociação inteligente aqui
+                balanced_assignments.append(0)
             else:
                 balanced_assignments.append(assignment)
-
-        logger.info(f"   ✅ Clusters balanceados: {len(valid_clusters)} clusters válidos")
+        
         return balanced_assignments
 
-    def _analyze_cluster_distribution(self, df):
-        """Analisa e visualiza a distribuição dos clusters"""
+    def _prepare_result_dataframe(self, original_df, clusters):
+        """Prepara DataFrame final com clusters e análises"""
+        result_df = original_df.iloc[:len(clusters)].copy()
+        result_df['CLUSTER_SOM'] = clusters
+        result_df['CLUSTER_SIZE'] = result_df['CLUSTER_SOM'].map(
+            result_df['CLUSTER_SOM'].value_counts()
+        )
+        return result_df
+
+    def _comprehensive_analysis(self, df, data, clusters):
+        """Executa análise completa dos clusters"""
+        logger.info("   📊 Iniciando análise compreensiva...")
+        
+        # Análise de qualidade
+        quality_metrics = self.quality_evaluator.comprehensive_cluster_quality(
+            data, clusters, self.som_trainer.som
+        )
+        
+        # Análises detalhadas
+        self._advanced_cluster_distribution_analysis(df)
+        self._cluster_characteristics_analysis(df)
+        self._create_comprehensive_visualizations(df, data, clusters)
+        
+        return quality_metrics
+
+    def _advanced_cluster_distribution_analysis(self, df):
+        """Análise avançada da distribuição de clusters"""
+        logger.info("\n📊 DISTRIBUIÇÃO AVANÇADA DOS CLUSTERS")
+        
         cluster_dist = df['CLUSTER_SOM'].value_counts().sort_index()
+        valid_clusters = cluster_dist[cluster_dist.index != 0]
+        
+        if len(valid_clusters) == 0:
+            logger.warning("   ⚠️  Nenhum cluster válido encontrado!")
+            return
+        
+        # Estatísticas detalhadas
+        total_records = len(df)
+        noise_count = cluster_dist.get(0, 0)
+        clustered_records = valid_clusters.sum()
+        
+        logger.info(f"   • Clusters válidos: {len(valid_clusters)}")
+        logger.info(f"   • Registros em clusters: {clustered_records:,} ({clustered_records/total_records*100:.1f}%)")
+        logger.info(f"   • Registros como ruído: {noise_count:,} ({noise_count/total_records*100:.1f}%)")
+        logger.info(f"   • Tamanho médio do cluster: {valid_clusters.mean():.0f} registros")
+        logger.info(f"   • Desvio padrão: {valid_clusters.std():.0f} registros")
+        
+        # Identificar clusters outliers
+        Q1 = valid_clusters.quantile(0.25)
+        Q3 = valid_clusters.quantile(0.75)
+        IQR = Q3 - Q1
+        outlier_threshold = Q3 + 1.5 * IQR
+        outliers = valid_clusters[valid_clusters > outlier_threshold]
+        
+        if len(outliers) > 0:
+            logger.info(f"   • Clusters grandes (outliers): {list(outliers.index)}")
 
-        # Filtrar cluster 0 (ruído/background)
-        filtered_dist = cluster_dist[cluster_dist.index != 0]
-
-        logger.info(f"\n📊 DISTRIBUIÇÃO DOS CLUSTERS (excluindo ruído):")
-        logger.info(f"   • Total de clusters: {len(filtered_dist)}")
-        logger.info(f"   • Registros em clusters: {filtered_dist.sum():,}")
-        logger.info(f"   • Registros como ruído: {cluster_dist.get(0, 0):,}")
-
-        # Visualização melhorada
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
-
-        # Gráfico de barras
-        colors = plt.cm.Set3(np.linspace(0, 1, len(filtered_dist)))
-        bars = ax1.bar(range(len(filtered_dist)), filtered_dist.values, color=colors)
-        ax1.set_title('Distribuição de Registros por Cluster', fontsize=14, fontweight='bold')
-        ax1.set_xlabel('Cluster ID')
-        ax1.set_ylabel('Número de Registros')
-        ax1.set_xticks(range(len(filtered_dist)))
-        ax1.set_xticklabels(filtered_dist.index)
-
-        # Adicionar valores nas barras
-        for bar, count in zip(bars, filtered_dist.values):
-            ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-                     f'{count:,}', ha='center', va='bottom', fontweight='bold')
-
-        # Gráfico de pizza (apenas para clusters significativos)
-        significant_clusters = filtered_dist[filtered_dist > filtered_dist.sum() * 0.01]  # >1%
-        if len(significant_clusters) > 1:
-            ax2.pie(significant_clusters.values, labels=significant_clusters.index,
-                    autopct='%1.1f%%', startangle=90, colors=plt.cm.Set3(np.linspace(0, 1, len(significant_clusters))))
-            ax2.set_title('Proporção dos Clusters Principais (>1%)', fontsize=14, fontweight='bold')
-        else:
-            ax2.text(0.5, 0.5, 'Clusters muito\ndesbalanceados\npara visualização',
-                     ha='center', va='center', transform=ax2.transAxes, fontsize=12)
-            ax2.set_title('Distribuição de Clusters', fontsize=14, fontweight='bold')
-
-        plt.tight_layout()
-        plt.savefig('som_cluster_distribution_enhanced.png', dpi=300, bbox_inches='tight')
-        plt.close()
-
-    def _analyze_cluster_characteristics(self, df):
-        """Analisa características de cada cluster"""
-        logger.info("\n📈 CARACTERÍSTICAS POR CLUSTER:")
-
-        # Filtrar cluster 0 (ruído)
+    def _cluster_characteristics_analysis(self, df):
+        """Análise detalhada das características dos clusters"""
+        logger.info("\n📈 ANÁLISE DETALHADA POR CLUSTER")
+        
         valid_clusters = sorted([c for c in df['CLUSTER_SOM'].unique() if c != 0])
-
+        
+        if not valid_clusters:
+            logger.warning("   ⚠️  Nenhum cluster válido para análise!")
+            return
+        
         for cluster_id in valid_clusters:
             cluster_data = df[df['CLUSTER_SOM'] == cluster_id]
-            size = len(cluster_data)
-            percentage = (size / len(df)) * 100
+            self._analyze_single_cluster(cluster_data, cluster_id, df)
 
-            logger.info(f"\n🔸 CLUSTER {cluster_id}: {size:,} registros ({percentage:.1f}%)")
-            logger.info("   " + "─" * 40)
+    def _analyze_single_cluster(self, cluster_data, cluster_id, full_df):
+        """Analisa um cluster individual"""
+        size = len(cluster_data)
+        percentage = (size / len(full_df)) * 100
+        
+        logger.info(f"\n🎯 CLUSTER {cluster_id}: {size:,} registros ({percentage:.1f}%)")
+        logger.info("   " + "─" * 50)
+        
+        # Análise de features categóricas
+        self._analyze_categorical_features(cluster_data, size)
+        
+        # Análise de features numéricas
+        self._analyze_numeric_features(cluster_data, full_df)
 
-            # Análise de características principais
-            self._analyze_cluster_features(cluster_data, cluster_id, df)
-
-    def _analyze_cluster_features(self, cluster_data, cluster_id, full_df):
-        """Analisa features mais importantes de cada cluster"""
+    def _analyze_categorical_features(self, cluster_data, cluster_size):
+        """Analisa features categóricas do cluster"""
         categorical_insights = {}
-
-        for col in cluster_data.select_dtypes(include=['object']).columns:
-            if cluster_data[col].nunique() < 20:
-                top_value = cluster_data[col].value_counts().head(1)
-                if len(top_value) > 0:
-                    value, count = top_value.index[0], top_value.values[0]
-                    percentage = (count / len(cluster_data)) * 100
-                    if percentage > 25:  # Limite mais baixo para capturar mais padrões
-                        categorical_insights[col] = (value, percentage)
-
+        
+        for col in cluster_data.select_dtypes(include=['object', 'category']).columns:
+            if cluster_data[col].nunique() < 15:  # Limite para evitar alta cardinalidade
+                value_counts = cluster_data[col].value_counts()
+                top_value = value_counts.head(2)  # Top 2 valores
+                
+                for value, count in top_value.items():
+                    percentage = (count / cluster_size) * 100
+                    if percentage > 20:  # Threshold mais baixo para capturar padrões
+                        if col not in categorical_insights:
+                            categorical_insights[col] = []
+                        categorical_insights[col].append((value, percentage))
+        
         if categorical_insights:
-            logger.info("   🏷️  Características principais:")
-            for col, (value, percentage) in list(categorical_insights.items())[:6]:  # Mais características
-                logger.info(f"     • {col}: {value} ({percentage:.1f}%)")
+            logger.info("   🏷️  CARACTERÍSTICAS CATEGÓRICAS:")
+            for col, values in list(categorical_insights.items())[:8]:
+                insights_str = ", ".join([f"{val} ({pct:.1f}%)" for val, pct in values[:2]])
+                logger.info(f"     • {col}: {insights_str}")
 
+    def _analyze_numeric_features(self, cluster_data, full_df):
+        """Analisa features numéricas com comparação global"""
         numeric_cols = cluster_data.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_cols) == 0:
+            return
+            
+        logger.info("   📊 CARACTERÍSTICAS NUMÉRICAS:")
+        
+        for col in list(numeric_cols)[:6]:  # Limitar para não poluir
+            cluster_mean = cluster_data[col].mean()
+            global_mean = full_df[col].mean()
+            difference_pct = ((cluster_mean - global_mean) / global_mean) * 100
+            
+            cluster_stats = cluster_data[col].describe()
+            
+            significance = "↑↑" if difference_pct > 15 else "↓↓" if difference_pct < -15 else "≈"
+            
+            logger.info(f"     • {col}: {significance} avg={cluster_mean:.1f} "
+                       f"(global: {global_mean:.1f}, diff: {difference_pct:+.1f}%)")
+
+    def _create_comprehensive_visualizations(self, df, data, clusters):
+        """Cria visualizações abrangentes dos clusters"""
+        logger.info("   🎨 Criando visualizações...")
+        
+        fig = plt.figure(figsize=(20, 16))
+        
+        # 1. Distribuição de clusters
+        ax1 = plt.subplot(2, 3, 1)
+        self._plot_cluster_distribution(df, ax1)
+        
+        # 2. Composição dos clusters (features principais)
+        ax2 = plt.subplot(2, 3, 2)
+        self._plot_cluster_composition(df, ax2)
+        
+        # 3. Heatmap de características
+        ax3 = plt.subplot(2, 3, 3)
+        self._plot_feature_heatmap(df, ax3)
+        
+        # 4. Dimensionalidade reduzida (se disponível)
+        ax4 = plt.subplot(2, 3, 4)
+        self._plot_projection(df, data, clusters, ax4)
+        
+        # 5. Tamanho dos clusters vs qualidade
+        ax5 = plt.subplot(2, 3, 5)
+        self._plot_cluster_quality(df, ax5)
+        
+        # 6. Matriz de correlação entre clusters
+        ax6 = plt.subplot(2, 3, 6)
+        self._plot_cluster_correlation(df, ax6)
+        
+        plt.tight_layout()
+        plt.savefig('advanced_som_cluster_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Gráfico adicional: Radar chart para perfis de cluster
+        self._create_radar_chart(df)
+
+    def _plot_cluster_distribution(self, df, ax):
+        """Plot da distribuição de clusters"""
+        cluster_dist = df['CLUSTER_SOM'].value_counts().sort_index()
+        valid_clusters = cluster_dist[cluster_dist.index != 0]
+        
+        colors = plt.cm.viridis(np.linspace(0, 1, len(valid_clusters)))
+        bars = ax.bar(range(len(valid_clusters)), valid_clusters.values, color=colors)
+        
+        ax.set_title('Distribuição de Clusters', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Cluster ID')
+        ax.set_ylabel('Número de Registros')
+        ax.set_xticks(range(len(valid_clusters)))
+        ax.set_xticklabels(valid_clusters.index, rotation=45)
+        
+        # Adicionar valores
+        for bar, count in zip(bars, valid_clusters.values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                   f'{count:,}', ha='center', va='bottom', fontsize=9)
+
+    def _plot_cluster_composition(self, df, ax):
+        """Plot da composição dos clusters por features principais"""
+        # Implementar análise de features mais importantes por cluster
+        valid_clusters = sorted([c for c in df['CLUSTER_SOM'].unique() if c != 0])
+        
+        if len(valid_clusters) == 0:
+            ax.text(0.5, 0.5, 'Sem clusters válidos', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Composição dos Clusters', fontsize=14)
+            return
+        
+        # Exemplo simplificado - adaptar conforme necessidade
+        composition_data = []
+        for cluster_id in valid_clusters[:5]:  # Limitar a 5 clusters
+            cluster_data = df[df['CLUSTER_SOM'] == cluster_id]
+            # Calcular métricas de composição aqui
+            
+        ax.set_title('Composição dos Clusters\n(Top Features)', fontsize=14, fontweight='bold')
+
+    def _plot_feature_heatmap(self, df, ax):
+        """Heatmap de características dos clusters"""
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
         if len(numeric_cols) > 0:
-            logger.info("   📊 Estatísticas numéricas:")
-            for col in list(numeric_cols)[:4]:  # Mais colunas numéricas
-                stats = cluster_data[col].describe()
-                logger.info(f"     • {col}: avg={stats['mean']:.1f}, min={stats['min']:.1f}, max={stats['max']:.1f}")
+            # Calcular médias por cluster para heatmap
+            cluster_means = df.groupby('CLUSTER_SOM')[numeric_cols[:8]].mean()  # Top 8 features
+            
+            if len(cluster_means) > 1:
+                # Normalizar para melhor visualização
+                normalized_means = (cluster_means - cluster_means.mean()) / cluster_means.std()
+                sns.heatmap(normalized_means.iloc[1:], ax=ax, cmap='RdBu_r', center=0, 
+                           annot=True, fmt='.2f', cbar_kws={'label': 'Z-score'})
+                ax.set_title('Heatmap de Características\n(Normalizado)', fontsize=14, fontweight='bold')
+            else:
+                ax.text(0.5, 0.5, 'Dados insuficientes\npara heatmap', 
+                       ha='center', va='center', transform=ax.transAxes)
+        else:
+            ax.text(0.5, 0.5, 'Sem features numéricas', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Heatmap de Características', fontsize=14)
+
+    def _plot_projection(self, df, data, clusters, ax):
+        """Projeção dos clusters em 2D (se disponível)"""
+        try:
+            from sklearn.manifold import TSNE
+            from sklearn.decomposition import PCA
+            
+            # Usar PCA ou t-SNE para projeção
+            if data.shape[1] > 2:
+                projector = PCA(n_components=2, random_state=42)
+                projection = projector.fit_transform(data)
+                title = 'Projeção PCA dos Clusters'
+            else:
+                projection = data
+                title = 'Visualização Direta dos Clusters'
+            
+            scatter = ax.scatter(projection[:, 0], projection[:, 1], 
+                               c=clusters, cmap='tab10', alpha=0.6, s=30)
+            ax.set_title(title, fontsize=14, fontweight='bold')
+            ax.set_xlabel('Componente 1')
+            ax.set_ylabel('Componente 2')
+            
+            # Adicionar legenda para clusters
+            plt.colorbar(scatter, ax=ax, label='Cluster ID')
+            
+        except ImportError:
+            ax.text(0.5, 0.5, 'Scikit-learn não disponível\npara projeção', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Projeção dos Clusters', fontsize=14)
+
+    def _plot_cluster_quality(self, df, ax):
+        """Plot de qualidade vs tamanho dos clusters"""
+        valid_clusters = [c for c in df['CLUSTER_SOM'].unique() if c != 0]
+        
+        if len(valid_clusters) < 2:
+            ax.text(0.5, 0.5, 'Clusters insuficientes\npara análise', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Qualidade vs Tamanho', fontsize=14)
+            return
+        
+        cluster_sizes = []
+        cluster_qualities = []  # Métricas de qualidade podem ser adicionadas
+        
+        for cluster_id in valid_clusters:
+            cluster_data = df[df['CLUSTER_SOM'] == cluster_id]
+            cluster_sizes.append(len(cluster_data))
+            # Calcular métricas de qualidade aqui
+        
+        ax.scatter(cluster_sizes, cluster_qualities if cluster_qualities else cluster_sizes, 
+                  alpha=0.6, s=60)
+        ax.set_xlabel('Tamanho do Cluster')
+        ax.set_ylabel('Métrica de Qualidade' if cluster_qualities else 'Tamanho')
+        ax.set_title('Relação: Tamanho vs Qualidade', fontsize=14, fontweight='bold')
+
+    def _plot_cluster_correlation(self, df, ax):
+        """Matriz de correlação entre clusters"""
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_cols) < 2:
+            ax.text(0.5, 0.5, 'Features insuficientes\npara correlação', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Correlação entre Clusters', fontsize=14)
+            return
+        
+        # Calcular correlações médias entre clusters
+        valid_clusters = [c for c in df['CLUSTER_SOM'].unique() if c != 0]
+        
+        if len(valid_clusters) < 2:
+            ax.text(0.5, 0.5, 'Clusters insuficientes', 
+                   ha='center', va='center', transform=ax.transAxes)
+            return
+        
+        # Implementar cálculo de similaridade entre clusters
+        correlation_matrix = np.corrcoef([df[df['CLUSTER_SOM'] == c][numeric_cols[0]].values 
+                                        for c in valid_clusters if len(df[df['CLUSTER_SOM'] == c]) > 1])
+        
+        im = ax.imshow(correlation_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+        ax.set_xticks(range(len(valid_clusters)))
+        ax.set_yticks(range(len(valid_clusters)))
+        ax.set_xticklabels(valid_clusters)
+        ax.set_yticklabels(valid_clusters)
+        ax.set_title('Similaridade entre Clusters', fontsize=14, fontweight='bold')
+        plt.colorbar(im, ax=ax)
+
+    def _create_radar_chart(self, df):
+        """Cria gráfico radar para perfis de clusters"""
+        try:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns[:6]  # Top 6 features
+            
+            if len(numeric_cols) < 3:
+                return
+                
+            valid_clusters = [c for c in df['CLUSTER_SOM'].unique() if c != 0][:8]  # Top 8 clusters
+            
+            if len(valid_clusters) < 2:
+                return
+            
+            # Preparar dados para radar chart
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111, polar=True)
+            
+            # Ângulos para cada feature
+            angles = np.linspace(0, 2*np.pi, len(numeric_cols), endpoint=False).tolist()
+            angles += angles[:1]  # Fechar o círculo
+            
+            for cluster_id in valid_clusters:
+                cluster_data = df[df['CLUSTER_SOM'] == cluster_id]
+                values = cluster_data[numeric_cols].mean().tolist()
+                values += values[:1]  # Fechar o círculo
+                
+                ax.plot(angles, values, 'o-', linewidth=2, label=f'Cluster {cluster_id}')
+                ax.fill(angles, values, alpha=0.1)
+            
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(numeric_cols)
+            ax.set_title('Perfil dos Clusters - Radar Chart', size=14, fontweight='bold')
+            ax.legend(bbox_to_anchor=(1.1, 1.1))
+            
+            plt.savefig('cluster_radar_chart.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            logger.warning(f"   ⚠️  Não foi possível criar radar chart: {e}")
+
+    def get_cluster_profiles(self) -> Dict:
+        """Retorna perfis detalhados dos clusters"""
+        return self.cluster_profiles
+
+    def generate_cluster_report(self, df, output_file='cluster_analysis_report.txt'):
+        """Gera relatório completo da análise"""
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write("RELATÓRIO DE ANÁLISE DE CLUSTERS - SOM\n")
+            f.write("=" * 50 + "\n\n")
+            
+            # Estatísticas básicas
+            cluster_dist = df['CLUSTER_SOM'].value_counts().sort_index()
+            valid_clusters = cluster_dist[cluster_dist.index != 0]
+            
+            f.write(f"ESTATÍSTICAS GERAIS:\n")
+            f.write(f"- Total de clusters válidos: {len(valid_clusters)}\n")
+            f.write(f"- Total de registros: {len(df):,}\n")
+            f.write(f"- Registros em clusters: {valid_clusters.sum():,}\n")
+            f.write(f"- Registros como ruído: {cluster_dist.get(0, 0):,}\n\n")
+            
+            # Perfil de cada cluster
+            f.write("PERFIS DOS CLUSTERS:\n")
+            f.write("-" * 30 + "\n")
+            
+            for cluster_id in valid_clusters.index:
+                cluster_data = df[df['CLUSTER_SOM'] == cluster_id]
+                size = len(cluster_data)
+                percentage = (size / len(df)) * 100
+                
+                f.write(f"\nCLUSTER {cluster_id} ({size:,} registros - {percentage:.1f}%):\n")
+                
+                # Features mais importantes
+                for col in cluster_data.select_dtypes(include=['object', 'category']).columns[:3]:
+                    if cluster_data[col].nunique() < 10:
+                        top_value = cluster_data[col].value_counts().head(1)
+                        if len(top_value) > 0:
+                            value, count = top_value.index[0], top_value.values[0]
+                            pct = (count / size) * 100
+                            f.write(f"  • {col}: {value} ({pct:.1f}%)\n")
+        
+        logger.info(f"   📄 Relatório salvo em: {output_file}")
+
+# Versão de compatibilidade para código existente
+SOMClusterInterpreter = AdvancedSOMClusterInterpreter
