@@ -44,16 +44,40 @@ def main():
         logger.info("🎯 FASE 1: PRÉ-PROCESSAMENTO E ANÁLISE EXPLORATÓRIA")
         preprocessor = AdvancedDataPreprocessor()
 
-        df = preprocessor.load_and_analyze_data(args.input, args.sample_frac)
-        preprocessor.create_eda_visualizations(df)
+        # Primeiro carregamos o dataframe original para ter as colunas originais
+        try:
+            df = pd.read_csv(args.input, sep=';', encoding='utf-8', low_memory=False)
+        except UnicodeDecodeError:
+            df = pd.read_csv(args.input, sep=';', encoding='latin-1', low_memory=False)
 
-        features_df = preprocessor.enhanced_feature_engineering(df)
-        X_processed = preprocessor.smart_encoding(features_df)
+        # Aplicar amostragem se necessário
+        if args.sample_frac and args.sample_frac < 1.0:
+            df = df.sample(frac=args.sample_frac, random_state=42)
+            logger.info(f"📊 Aplicada amostragem: {args.sample_frac*100}% dos dados")
+
+        # CORREÇÃO: Agora passamos o caminho do arquivo para o preprocessor
+        X_processed = preprocessor.full_pipeline(args.input, args.sample_frac)
+
+        # IMPORTANTE: O full_pipeline remove outliers, então temos menos linhas
+        # Precisamos sincronizar df com X_processed
+        # Se X_processed tiver índice, usamos ele (assumindo que a ordem foi mantida)
+        if hasattr(X_processed, 'index'):
+            try:
+                # Tentamos alinhar pelo índice
+                df = df.iloc[X_processed.index].copy()
+                logger.info("✅ Dados originais alinhados com dados processados pelo índice")
+            except:
+                # Fallback: usar o mesmo número de linhas
+                df = df.head(len(X_processed)).copy()
+                logger.warning("⚠️  Usando fallback para alinhamento de dados")
+        else:
+            # X_processed não tem índice (array numpy)
+            df = df.head(len(X_processed)).copy()
+            logger.warning("⚠️  X_processed não tem índice, usando fallback")
 
         X_processed.to_parquet(args.output, index=False)
-        preprocessor.save_preprocessing_artifacts()
         logger.info(f"💾 Dados processados salvos: {args.output}")
-
+       
         # 2. TREINAMENTO DA REDE DE KOHONEN
         logger.info("🎯 FASE 2: TREINAMENTO DA REDE DE KOHONEN")
 
@@ -139,5 +163,5 @@ if __name__ == '__main__':
 
     # Instrução para rodar o script:
     # python main.py --input SPSafe_2022.csv --output X_ready_advanced.parquet --sample_frac 0.3 --iterations 1000 --max_clusters 12 --map_size 20 --sigma 1.0 --learning_rate 0.5 --optimize
-    #python main.py --input SPSafe_2022.csv --sample_frac 0.1 --iterations 300 --map_size 10
-    #python main.py --input SPSafe_2022.csv --sample_frac 0.3 --optimize
+    # python main.py --input SPSafe_2022.csv --sample_frac 0.1 --iterations 300 --map_size 10
+    # python main.py --input SPSafe_2022.csv --sample_frac 0.3 --optimize

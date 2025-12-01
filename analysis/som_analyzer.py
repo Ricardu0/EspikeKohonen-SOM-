@@ -230,6 +230,52 @@ class KohonenAdvancedAnalyzer:
                     umatrix[i,j] = np.mean(dists)
         
         return umatrix
+    
+    # Adicione este método para calcular métricas com amostragem
+    def compute_quality_metrics_safe(self, som, data, sample_size=10000):
+        """Calcula métricas de qualidade com amostragem para evitar problemas de memória"""
+        if len(data) > sample_size:
+            # Usar amostra aleatória
+            indices = np.random.choice(len(data), sample_size, replace=False)
+            sample_data = data[indices]
+        else:
+            sample_data = data
+        
+        try:
+            q_error = som.quantization_error(sample_data)
+        except MemoryError:
+            # Fallback: calcular manualmente em lotes
+            q_error = self._batch_quantization_error(som, sample_data)
+        
+        try:
+            t_error = som.topographic_error(sample_data)
+        except MemoryError:
+            # Para TE, usar amostra ainda menor
+            if len(sample_data) > 5000:
+                indices = np.random.choice(len(sample_data), 5000, replace=False)
+                t_error = som.topographic_error(sample_data[indices])
+            else:
+                t_error = som.topographic_error(sample_data)
+        
+        return q_error, t_error
+
+    def _batch_quantization_error(self, som, data, batch_size=1000):
+        """Calcula QE em lotes"""
+        total_distance = 0.0
+        n_batches = int(np.ceil(len(data) / batch_size))
+        
+        for i in range(n_batches):
+            batch_start = i * batch_size
+            batch_end = min((i + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
+            
+            # Calcular distância para cada ponto do batch
+            for j, x in enumerate(batch):
+                winner = som.winner(x)
+                weight = som._weights[winner]
+                total_distance += np.linalg.norm(x - weight)
+        
+        return total_distance / len(data)
 
     def _create_enhanced_activation_map(self, som, data, ax):
         """Cria mapa de ativação avançado"""
@@ -272,22 +318,47 @@ class KohonenAdvancedAnalyzer:
             self._plot_error(ax, f"Erro no mapa de ativação: {str(e)}")
 
     def _create_natural_clusters(self, som, data, ax, density_threshold=0.6):
-        """Identifica clusters naturais baseados em densidade"""
+        """Identifica clusters naturais usando Watershed algorithm"""
         try:
-            # Normalizar mapa de ativação
-            if np.max(self.activation_map) > 0:
-                normalized_activation = self.activation_map / np.max(self.activation_map)
-            else:
-                normalized_activation = self.activation_map.copy()
+            # Calcular U-Matrix se não disponível
+            if self.umatrix is None:
+                if hasattr(som, 'distance_map'):
+                    self.umatrix = som.distance_map().T
+                else:
+                    self.umatrix = self._compute_umatrix(som)
             
-            # Suavizar para melhor detecção de clusters
-            smoothed_density = gaussian_filter(normalized_activation, sigma=1.0)
+            # 1. Normalizar U-Matrix
+            umat_norm = (self.umatrix - self.umatrix.min()) / (self.umatrix.max() - self.umatrix.min())
             
-            # Identificar regiões de alta densidade
-            high_density_mask = smoothed_density > density_threshold
+            # 2. Usar watershed do scikit-image se disponível
+            try:
+                from skimage.segmentation import watershed
+                from skimage.filters import sobel
+                
+                # Calcular gradiente
+                gradient = sobel(umat_norm)
+                
+                # Encontrar marcadores
+                from skimage.feature import peak_local_max
+                coordinates = peak_local_max(umat_norm, min_distance=2, threshold_rel=0.3)
+                
+                markers = np.zeros_like(umat_norm, dtype=np.int32)
+                for i, (x, y) in enumerate(coordinates):
+                    markers[x, y] = i + 1
+                
+                # Aplicar watershed
+                clusters = watershed(gradient, markers)
+                
+            except ImportError:
+                # Fallback: usar algoritmo mais simples
+                clusters = self._simple_clustering(umat_norm, threshold=0.5)
             
-            # Encontrar componentes conectados
-            labeled_array, num_clusters = label(high_density_mask)
+            # Converter para formato compatível
+            labeled_array = clusters
+            
+            # Contar clusters (excluir 0 que é background)
+            unique_clusters = np.unique(labeled_array)
+            num_clusters = len(unique_clusters[unique_clusters != 0])
             
             logger.info(f"   📊 Identificados {num_clusters} clusters naturais")
             
@@ -297,25 +368,21 @@ class KohonenAdvancedAnalyzer:
             # Criar mapa de cores para clusters
             colors = plt.cm.tab20(np.linspace(0, 1, num_clusters + 1))
             
-            cluster_sizes = []
-            valid_clusters = []
-            
-            for cluster_id in range(1, num_clusters + 1):
+            for cluster_id in unique_clusters:
+                if cluster_id == 0:
+                    continue
+                    
                 cluster_mask = labeled_array == cluster_id
                 y_coords, x_coords = np.where(cluster_mask)
                 
                 if len(x_coords) >= 2:  # Cluster deve ter pelo menos 2 neurônios
-                    # Calcular estatísticas do cluster
+                    # Centroide
                     centroid_x = np.mean(x_coords)
                     centroid_y = np.mean(y_coords)
-                    cluster_size = len(x_coords)
-                    
-                    cluster_sizes.append(cluster_size)
-                    valid_clusters.append(cluster_id)
                     
                     # Plotar cluster
                     scatter = ax.scatter(x_coords, y_coords, 
-                                       color=colors[cluster_id],
+                                       color=colors[cluster_id % len(colors)],
                                        label=f'C{cluster_id}',
                                        alpha=0.7, s=30, edgecolors='white', linewidth=0.5)
                     
@@ -325,20 +392,75 @@ class KohonenAdvancedAnalyzer:
                            bbox=dict(boxstyle="circle,pad=0.2", facecolor='white', 
                                    alpha=0.8, edgecolor='black'))
             
-            ax.set_title(f'Clusters Naturais por Densidade\n{len(valid_clusters)} Clusters Identificados',
+            ax.set_title(f'Clusters Naturais por Densidade\n{num_clusters} Clusters Identificados',
                         fontsize=11, fontweight='bold', pad=10)
             ax.set_xlabel('Coordenada X')
             ax.set_ylabel('Coordenada Y')
             
             # Legenda se não for muitos clusters
-            if len(valid_clusters) <= 15:
+            if num_clusters <= 15:
                 ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
             
             return labeled_array
             
         except Exception as e:
-            self._plot_error(ax, f"Erro nos clusters: {str(e)}")
-            return None
+            logger.error(f"Erro nos clusters: {e}")
+            # Fallback: usar k-means simples nos neurônios
+            return self._fallback_clustering(som, data, ax)
+
+    def _simple_clustering(self, umat_norm, threshold=0.5):
+        """Clustering simples baseado em threshold"""
+        # Encontrar regiões abaixo do threshold (vales)
+        valleys = umat_norm < threshold
+        
+        # Rotular componentes conectados
+        from scipy.ndimage import label
+        labeled_array, num_features = label(valleys)
+        
+        return labeled_array
+
+    def _fallback_clustering(self, som, data, ax, n_clusters=10):
+        """Fallback usando k-means nos BMUs"""
+        from sklearn.cluster import KMeans
+        
+        # Calcular BMUs para uma amostra
+        sample_size = min(5000, len(data))
+        indices = np.random.choice(len(data), sample_size, replace=False)
+        sample_data = data[indices]
+        
+        # Obter BMUs
+        bmus = []
+        for sample in sample_data:
+            winner = som.winner(sample)
+            bmus.append(winner)
+        
+        bmus_array = np.array(bmus)
+        
+        # Aplicar k-means
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        cluster_labels = kmeans.fit_predict(bmus_array)
+        
+        # Criar mapa de clusters
+        cluster_map = np.zeros((som._weights.shape[0], som._weights.shape[1]), dtype=int)
+        
+        # Mapear cada BMU para sua posição no mapa
+        for i, (x, y) in enumerate(bmus_array):
+            cluster_map[x, y] = cluster_labels[i] + 1
+        
+        # Plotar
+        ax.imshow(self.umatrix, cmap='gray', alpha=0.4, aspect='auto')
+        
+        for cluster_id in range(1, n_clusters + 1):
+            y_coords, x_coords = np.where(cluster_map == cluster_id)
+            if len(x_coords) > 0:
+                ax.scatter(x_coords, y_coords, 
+                          color=plt.cm.tab20(cluster_id / n_clusters),
+                          label=f'C{cluster_id}', alpha=0.7, s=30)
+        
+        ax.set_title(f'Clusters por K-Means (Fallback)\n{n_clusters} Clusters',
+                    fontsize=11, fontweight='bold')
+         
+        return cluster_map
 
     def _create_component_planes(self, som, ax, num_components=4):
         """Cria visualização de component planes para features importantes"""

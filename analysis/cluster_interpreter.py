@@ -472,17 +472,47 @@ class AdvancedSOMClusterInterpreter:
                    ha='center', va='center', transform=ax.transAxes)
             return
         
-        # Implementar cálculo de similaridade entre clusters
-        correlation_matrix = np.corrcoef([df[df['CLUSTER_SOM'] == c][numeric_cols[0]].values 
-                                        for c in valid_clusters if len(df[df['CLUSTER_SOM'] == c]) > 1])
-        
+         # Calcula as médias das features numéricas por cluster
+        cluster_means = []
+        cluster_labels = []
+    
+        for c in valid_clusters:
+            cluster_data = df[df['CLUSTER_SOM'] == c]
+            if len(cluster_data) > 1:  # Precisa ter pelo menos 2 pontos
+                # Calcula a média das features numéricas para este cluster
+                means = cluster_data[numeric_cols].mean().values
+                cluster_means.append(means)
+                cluster_labels.append(c)
+    
+            if len(cluster_means) < 2:
+                ax.text(0.5, 0.5, 'Dados insuficientes\npara correlação', 
+                    ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Correlação entre Clusters', fontsize=14)
+            return
+    
+    # Agora todas as arrays têm o mesmo comprimento (número de features)
+        cluster_means_array = np.array(cluster_means)  # Shape: (n_clusters, n_features)
+    
+    # Calcula correlação entre os perfis médios dos clusters
+        correlation_matrix = np.corrcoef(cluster_means_array)
+    
         im = ax.imshow(correlation_matrix, cmap='coolwarm', vmin=-1, vmax=1)
-        ax.set_xticks(range(len(valid_clusters)))
-        ax.set_yticks(range(len(valid_clusters)))
-        ax.set_xticklabels(valid_clusters)
-        ax.set_yticklabels(valid_clusters)
-        ax.set_title('Similaridade entre Clusters', fontsize=14, fontweight='bold')
-        plt.colorbar(im, ax=ax)
+        ax.set_xticks(range(len(cluster_labels)))
+        ax.set_yticks(range(len(cluster_labels)))
+        ax.set_xticklabels(cluster_labels)
+        ax.set_yticklabels(cluster_labels)
+        ax.set_title('Similaridade entre Clusters\n(Correlação dos Perfis Médias)', 
+                fontsize=14, fontweight='bold')
+    
+        # Adiciona valores na matriz
+        for i in range(len(cluster_labels)):
+            for j in range(len(cluster_labels)):
+                ax.text(j, i, f'{correlation_matrix[i, j]:.2f}',
+                   ha='center', va='center', 
+                   color='white' if abs(correlation_matrix[i, j]) > 0.5 else 'black',
+                   fontsize=9)
+    
+        plt.colorbar(im, ax=ax, label='Coeficiente de Correlação')
 
     def _create_radar_chart(self, df):
         """Cria gráfico radar para perfis de clusters"""
