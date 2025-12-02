@@ -158,6 +158,29 @@ def main():
         logger.error(traceback.format_exc())
         raise
 
+    if 'LATITUDE' in df_with_clusters.columns:
+        lat_mean = df_with_clusters['LATITUDE'].mean()
+        lon_mean = df_with_clusters['LONGITUDE'].mean()
+
+        if abs(lat_mean) > 100 or abs(lon_mean) > 100:
+            logger.error("❌ COORDENADAS AINDA CORROMPIDAS!")
+            logger.error(f"   Latitude média: {lat_mean:.0f}")
+            logger.error(f"   Longitude média: {lon_mean:.0f}")
+            logger.error("   AÇÃO: Verificar preprocessor linha ~80")
+        else:
+            logger.info(f"✅ Coordenadas OK: Lat={lat_mean:.2f}, Lon={lon_mean:.2f}")
+
+    # Verificar clusters
+    n_clusters = df_with_clusters['CLUSTER_SOM'].nunique() - 1  # -1 para excluir ruído
+    if n_clusters < 3:
+        logger.warning(f"⚠️  Poucos clusters: {n_clusters}")
+        logger.warning("   SUGESTÕES:")
+        logger.warning("   1. Aumentar map_size (atual: 30 → testar 40)")
+        logger.warning("   2. Reduzir sigma (atual: 1.5 → testar 1.0)")
+        logger.warning("   3. Aumentar iterations (atual: 5000 → testar 8000)")
+    else:
+        logger.info(f"✅ Clusters identificados: {n_clusters}")
+
 if __name__ == '__main__':
     main()
 

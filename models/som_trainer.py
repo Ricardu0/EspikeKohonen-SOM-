@@ -35,7 +35,7 @@ class MemoryEfficientSOMTrainer:
         # Fórmula adaptativa baseada na memória disponível
         # Estimar memória necessária: n_samples * n_neurons * 4 bytes (float32)
         # Vamos limitar a ~2GB de memória máxima estimada
-        
+
         # Tentar começar com tamanho razoável
         if n_samples > 100000:
             base_size = 40  # Para grandes datasets
@@ -47,26 +47,26 @@ class MemoryEfficientSOMTrainer:
             base_size = 25
         else:
             base_size = 20
-        
+
         # Verificar memória estimada
         estimated_memory = n_samples * (base_size ** 2) * 4 / (1024**3)  # GB
-        
+
         # Se memória estimada > 2GB, reduzir tamanho
         while estimated_memory > 2.0 and base_size > 15:
             base_size -= 5
             estimated_memory = n_samples * (base_size ** 2) * 4 / (1024**3)
-        
+
         # Arredondar para múltiplo de 5
         optimal_size = 5 * round(base_size / 5)
-        optimal_size = max(15, min(optimal_size, 50))  # Limites 15-50
-        
+        optimal_size = max(30, min(optimal_size, 70))  # Limites 15-50
+
         ratio = n_samples / (optimal_size ** 2)
-        
+
         logger.info(f"📐 TAMANHO DO MAPA SEGURO:")
         logger.info(f"   • Mapa: {optimal_size}x{optimal_size} ({optimal_size**2} neurônios)")
         logger.info(f"   • Amostras por neurônio: {ratio:.1f}")
         logger.info(f"   • Memória estimada: {estimated_memory:.2f} GB")
-        
+
         return optimal_size, optimal_size
 
     def calculate_optimal_sigma(self, map_size: int) -> float:

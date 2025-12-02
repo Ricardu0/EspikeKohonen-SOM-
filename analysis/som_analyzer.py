@@ -318,7 +318,10 @@ class KohonenAdvancedAnalyzer:
             self._plot_error(ax, f"Erro no mapa de ativação: {str(e)}")
 
     def _create_natural_clusters(self, som, data, ax, density_threshold=0.6):
-        """Identifica clusters naturais usando Watershed algorithm"""
+        """
+        ✅ MÉTODO COMPLETAMENTE REESCRITO
+        Usa K-Means no mapa de distâncias ao invés de Watershed
+        """
         try:
             # Calcular U-Matrix se não disponível
             if self.umatrix is None:
@@ -326,87 +329,130 @@ class KohonenAdvancedAnalyzer:
                     self.umatrix = som.distance_map().T
                 else:
                     self.umatrix = self._compute_umatrix(som)
-            
-            # 1. Normalizar U-Matrix
-            umat_norm = (self.umatrix - self.umatrix.min()) / (self.umatrix.max() - self.umatrix.min())
-            
-            # 2. Usar watershed do scikit-image se disponível
-            try:
-                from skimage.segmentation import watershed
-                from skimage.filters import sobel
-                
-                # Calcular gradiente
-                gradient = sobel(umat_norm)
-                
-                # Encontrar marcadores
-                from skimage.feature import peak_local_max
-                coordinates = peak_local_max(umat_norm, min_distance=2, threshold_rel=0.3)
-                
-                markers = np.zeros_like(umat_norm, dtype=np.int32)
-                for i, (x, y) in enumerate(coordinates):
-                    markers[x, y] = i + 1
-                
-                # Aplicar watershed
-                clusters = watershed(gradient, markers)
-                
-            except ImportError:
-                # Fallback: usar algoritmo mais simples
-                clusters = self._simple_clustering(umat_norm, threshold=0.5)
-            
-            # Converter para formato compatível
-            labeled_array = clusters
-            
-            # Contar clusters (excluir 0 que é background)
-            unique_clusters = np.unique(labeled_array)
-            num_clusters = len(unique_clusters[unique_clusters != 0])
-            
+
+            # ✅ NOVA ESTRATÉGIA: K-Means nos neurônios com ativação
+            from sklearn.cluster import KMeans
+
+            # 1. Encontrar neurônios ativos
+            if self.activation_map is None:
+                # Calcular ativação
+                self.activation_map = np.zeros((som._weights.shape[0], som._weights.shape[1]))
+                sample_size = min(10000, len(data))
+                sample_indices = np.random.choice(len(data), sample_size, replace=False)
+
+                for sample in data[sample_indices]:
+                    winner = som.winner(sample)
+                    self.activation_map[winner] += 1
+
+            # 2. Selecionar apenas neurônios com ativação > 0
+            active_mask = self.activation_map > 0
+            active_coords = np.argwhere(active_mask)
+
+            if len(active_coords) < 10:
+                logger.warning("Poucos neurônios ativos!")
+                return np.zeros_like(self.umatrix, dtype=int)
+
+            # 3. Extrair features dos neurônios ativos (pesos + posição + U-Matrix)
+            neuron_features = []
+            for i, j in active_coords:
+                features = np.concatenate([
+                    som._weights[i, j],  # Pesos do neurônio
+                    [i, j],  # Posição
+                    [self.umatrix[i, j]]  # Distância média
+                ])
+                neuron_features.append(features)
+
+            neuron_features = np.array(neuron_features)
+
+            # 4. Determinar número ótimo de clusters (Elbow Method simplificado)
+            max_k = min(15, len(active_coords) // 10)
+            if max_k < 2:
+                max_k = 2
+
+            inertias = []
+            K_range = range(2, max_k + 1)
+
+            for k in K_range:
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                kmeans.fit(neuron_features)
+                inertias.append(kmeans.inertia_)
+
+            # Encontrar "cotovelo" (maior queda relativa)
+            if len(inertias) > 2:
+                deltas = np.diff(inertias)
+                delta_ratios = np.abs(deltas[:-1] / deltas[1:])
+                optimal_k = np.argmax(delta_ratios) + 2
+                optimal_k = min(optimal_k, 10)  # Limitar a 10 clusters
+            else:
+                optimal_k = max_k
+
+            logger.info(f"   🎯 K-Means: {optimal_k} clusters (de {max_k} testados)")
+
+            # 5. Aplicar K-Means com k ótimo
+            kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=20)
+            neuron_labels = kmeans.fit_predict(neuron_features)
+
+            # 6. Criar mapa de clusters
+            cluster_map = np.zeros_like(self.umatrix, dtype=int)
+            for idx, (i, j) in enumerate(active_coords):
+                cluster_map[i, j] = neuron_labels[idx] + 1  # +1 para evitar confusão com background
+
+            num_clusters = len(np.unique(neuron_labels))
             logger.info(f"   📊 Identificados {num_clusters} clusters naturais")
-            
-            # Visualização
+
+            # 7. Visualização melhorada
             background = ax.imshow(self.umatrix, cmap='gray', alpha=0.4, aspect='auto')
-            
-            # Criar mapa de cores para clusters
-            colors = plt.cm.tab20(np.linspace(0, 1, num_clusters + 1))
-            
-            for cluster_id in unique_clusters:
-                if cluster_id == 0:
-                    continue
-                    
-                cluster_mask = labeled_array == cluster_id
+
+            # Usar colormap distinta
+            colors = plt.cm.tab20(np.linspace(0, 1, num_clusters))
+
+            for cluster_id in range(1, num_clusters + 1):
+                cluster_mask = cluster_map == cluster_id
                 y_coords, x_coords = np.where(cluster_mask)
-                
-                if len(x_coords) >= 2:  # Cluster deve ter pelo menos 2 neurônios
+
+                if len(x_coords) >= 1:
                     # Centroide
                     centroid_x = np.mean(x_coords)
                     centroid_y = np.mean(y_coords)
-                    
+
                     # Plotar cluster
-                    scatter = ax.scatter(x_coords, y_coords, 
-                                       color=colors[cluster_id % len(colors)],
-                                       label=f'C{cluster_id}',
-                                       alpha=0.7, s=30, edgecolors='white', linewidth=0.5)
-                    
-                    # Adicionar label do cluster
+                    scatter = ax.scatter(x_coords, y_coords,
+                                         color=colors[cluster_id - 1],
+                                         label=f'C{cluster_id}',
+                                         alpha=0.7, s=40, edgecolors='white', linewidth=0.8)
+
+                    # Label do cluster
                     ax.text(centroid_x, centroid_y, str(cluster_id),
-                           fontsize=9, fontweight='bold', ha='center', va='center',
-                           bbox=dict(boxstyle="circle,pad=0.2", facecolor='white', 
-                                   alpha=0.8, edgecolor='black'))
-            
-            ax.set_title(f'Clusters Naturais por Densidade\n{num_clusters} Clusters Identificados',
-                        fontsize=11, fontweight='bold', pad=10)
+                            fontsize=10, fontweight='bold', ha='center', va='center',
+                            bbox=dict(boxstyle="circle,pad=0.3", facecolor='white',
+                                      alpha=0.9, edgecolor='black', linewidth=1.5))
+
+            ax.set_title(f'Clusters Naturais (K-Means)\n{num_clusters} Clusters Identificados',
+                         fontsize=11, fontweight='bold', pad=10)
             ax.set_xlabel('Coordenada X')
             ax.set_ylabel('Coordenada Y')
-            
-            # Legenda se não for muitos clusters
-            if num_clusters <= 15:
-                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-            
-            return labeled_array
-            
+
+            # Legenda compacta
+            if num_clusters <= 12:
+                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, ncol=1)
+
+            return cluster_map
+
         except Exception as e:
-            logger.error(f"Erro nos clusters: {e}")
-            # Fallback: usar k-means simples nos neurônios
-            return self._fallback_clustering(som, data, ax)
+            logger.error(f"Erro nos clusters: {e}", exc_info=True)
+            # Fallback: criar clusters simples baseados em quadrantes
+            shape = self.umatrix.shape
+            cluster_map = np.zeros(shape, dtype=int)
+
+            # Dividir em 4 quadrantes
+            mid_x, mid_y = shape[0] // 2, shape[1] // 2
+            cluster_map[:mid_x, :mid_y] = 1
+            cluster_map[:mid_x, mid_y:] = 2
+            cluster_map[mid_x:, :mid_y] = 3
+            cluster_map[mid_x:, mid_y:] = 4
+
+            logger.warning("Usando fallback: 4 quadrantes")
+            return cluster_map
 
     def _simple_clustering(self, umat_norm, threshold=0.5):
         """Clustering simples baseado em threshold"""

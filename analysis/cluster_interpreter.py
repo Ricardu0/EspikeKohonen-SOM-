@@ -30,8 +30,8 @@ class AdvancedSOMClusterInterpreter:
         self.feature_names = None
 
     def analyze_som_clusters(self, X, original_df, max_clusters=15, 
-                           min_cluster_size_ratio=0.01, 
-                           noise_threshold=0.05) -> Tuple[pd.DataFrame, Dict]:
+                           min_cluster_size_ratio=0.001, 
+                           noise_threshold=0.10) -> Tuple[pd.DataFrame, Dict]:
         """
         Analisa clusters baseados no SOM com balanceamento avançado
         
@@ -145,35 +145,85 @@ class AdvancedSOMClusterInterpreter:
         }
 
     def _apply_balancing_strategies(self, assignments, cluster_stats, total_points,
-                                  max_clusters, min_cluster_size_ratio, noise_threshold):
-        """Aplica múltiplas estratégias de balanceamento"""
-        min_cluster_size = int(total_points * min_cluster_size_ratio)
+                                    max_clusters, min_cluster_size_ratio, noise_threshold):
+        """
+        ✅ BALANCEAMENTO ULTRA-FLEXÍVEL
+        """
+        # ✅ MUDANÇA: Threshold MUITO mais baixo
+        min_cluster_size = max(100, int(total_points * 0.0005))  # 0.05% ou 100 pontos
+
         assignments_array = np.array(assignments)
-        
+
+        logger.info(f"\n   📊 ANÁLISE DE BALANCEAMENTO:")
+        logger.info(f"      • Total de pontos: {total_points:,}")
+        logger.info(f"      • Tamanho mínimo: {min_cluster_size:,}")
+
         # Identificar clusters válidos
         valid_clusters = []
+        small_clusters = []
+        cluster_info = []
+
         for cluster_id in cluster_stats['valid_clusters']:
             cluster_size = cluster_stats['cluster_sizes'][cluster_id]
+            percentage = (cluster_size / total_points) * 100
+
+            cluster_info.append({
+                'id': cluster_id,
+                'size': cluster_size,
+                'percentage': percentage
+            })
+
             if cluster_size >= min_cluster_size:
                 valid_clusters.append(cluster_id)
-        
-        # Limitar número máximo de clusters
+                logger.info(f"      ✅ Cluster {cluster_id}: {cluster_size:,} ({percentage:.2f}%) - VÁLIDO")
+            else:
+                small_clusters.append(cluster_id)
+                logger.info(f"      ⚠️  Cluster {cluster_id}: {cluster_size:,} ({percentage:.2f}%) - PEQUENO")
+
+        # ✅ NOVO: Se nenhum cluster válido, forçar os 5 maiores
+        if len(valid_clusters) == 0:
+            logger.warning("      ⚠️  NENHUM cluster válido! Forçando os maiores...")
+            sorted_clusters = sorted(cluster_info, key=lambda x: x['size'], reverse=True)
+            num_to_keep = min(5, len(sorted_clusters))
+            valid_clusters = [c['id'] for c in sorted_clusters[:num_to_keep]]
+
+            for c in sorted_clusters[:num_to_keep]:
+                logger.info(f"      🔄 FORÇADO Cluster {c['id']}: {c['size']:,} ({c['percentage']:.2f}%)")
+
+        # Limitar número máximo
         if len(valid_clusters) > max_clusters:
-            valid_clusters = sorted(
-                valid_clusters,
-                key=lambda x: cluster_stats['cluster_sizes'][x],
-                reverse=True
-            )[:max_clusters]
-        
+            logger.info(f"      ✂️  Limitando de {len(valid_clusters)} para {max_clusters} clusters")
+            sorted_valid = sorted(cluster_info, key=lambda x: x['size'], reverse=True)
+            valid_clusters = [c['id'] for c in sorted_valid[:max_clusters] if c['id'] in valid_clusters]
+
         # Reatribuir pontos
         balanced_assignments = []
+        reallocated = 0
+        noise_count = 0
+
         for assignment in assignments:
-            if assignment == 0 or assignment not in valid_clusters:
-                # Pode-se implementar reassociação inteligente aqui
+            if assignment == 0:
                 balanced_assignments.append(0)
+                noise_count += 1
+            elif assignment not in valid_clusters:
+                # Realocar para o cluster válido mais próximo (por tamanho)
+                if len(valid_clusters) > 0:
+                    # Simplificação: usar o maior cluster
+                    largest = max(valid_clusters, key=lambda x: cluster_stats['cluster_sizes'][x])
+                    balanced_assignments.append(largest)
+                    reallocated += 1
+                else:
+                    balanced_assignments.append(0)
+                    noise_count += 1
             else:
                 balanced_assignments.append(assignment)
-        
+
+        logger.info(f"\n   ✅ BALANCEAMENTO CONCLUÍDO:")
+        logger.info(f"      • Clusters válidos: {len(valid_clusters)}")
+        logger.info(f"      • IDs: {sorted(valid_clusters)}")
+        logger.info(f"      • Realocados: {reallocated:,}")
+        logger.info(f"      • Ruído: {noise_count:,} ({noise_count / total_points * 100:.1f}%)")
+
         return balanced_assignments
 
     def _prepare_result_dataframe(self, original_df, clusters):
@@ -286,23 +336,28 @@ class AdvancedSOMClusterInterpreter:
     def _analyze_numeric_features(self, cluster_data, full_df):
         """Analisa features numéricas com comparação global"""
         numeric_cols = cluster_data.select_dtypes(include=[np.number]).columns
-        
+
         if len(numeric_cols) == 0:
             return
-            
+
         logger.info("   📊 CARACTERÍSTICAS NUMÉRICAS:")
-        
+
         for col in list(numeric_cols)[:6]:  # Limitar para não poluir
             cluster_mean = cluster_data[col].mean()
             global_mean = full_df[col].mean()
-            difference_pct = ((cluster_mean - global_mean) / global_mean) * 100
-            
-            cluster_stats = cluster_data[col].describe()
-            
+
+            # ✅ VALIDAÇÃO: Se coordenadas ainda corrompidas, avisar
+            if col in ['LATITUDE', 'LONGITUDE'] and abs(cluster_mean) > 1000:
+                logger.warning(f"      ⚠️  {col}: AINDA CORROMPIDO ({cluster_mean:.0f})")
+                logger.warning(f"          Aplicar correção de escala no preprocessor!")
+                continue
+
+            difference_pct = ((cluster_mean - global_mean) / abs(global_mean)) * 100 if global_mean != 0 else 0
+
             significance = "↑↑" if difference_pct > 15 else "↓↓" if difference_pct < -15 else "≈"
-            
+
             logger.info(f"     • {col}: {significance} avg={cluster_mean:.1f} "
-                       f"(global: {global_mean:.1f}, diff: {difference_pct:+.1f}%)")
+                        f"(global: {global_mean:.1f}, diff: {difference_pct:+.1f}%)")
 
     def _create_comprehensive_visualizations(self, df, data, clusters):
         """Cria visualizações abrangentes dos clusters"""
