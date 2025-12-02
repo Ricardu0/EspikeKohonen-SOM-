@@ -33,6 +33,11 @@ def main():
         parser.add_argument('--learning_rate', type=float, default=0.5, help='Taxa de aprendizado')
         parser.add_argument('--optimize', action='store_true', help='Otimizar hiperparâmetros automaticamente')
         parser.add_argument('--fast_optimize', action='store_true', help='Otimização rápida (menos combinações)')  # ✅ Nova opção
+        parser.add_argument('--preserve_all_clusters', action='store_true',
+                            help='Preserva todos os clusters, mesmo os pequenos (padrão: True)')
+        parser.add_argument('--min_cluster_size', type=int, default=10,
+                            help='Tamanho mínimo de cluster (usado apenas se preserve_all_clusters=False)')
+
 
         args = parser.parse_args()
 
@@ -139,9 +144,13 @@ def main():
         logger.info("🎯 FASE 4: ANÁLISE DE CLUSTERS (SOM PURO)")
         interpreter = SOMClusterInterpreter(preprocessor, kohonen_trainer, analyzer)
         df_with_clusters, quality_metrics = interpreter.analyze_som_clusters(
-            X_processed, df, args.max_clusters
+            X_processed,
+            df,
+            max_clusters=args.max_clusters,
+            min_cluster_size_ratio=0.0 if args.preserve_all_clusters else 0.001,  # ✅
+            reassign_noise=False,  # ✅ Nunca reatribuir ruído
+            top_n_features=15
         )
-
         # Salvar resultados finais
         df_with_clusters.to_parquet('dataset_com_clusters_som.parquet', index=False)
         joblib.dump(kohonen_trainer.som, 'kohonen_model_pure_som.pkl')

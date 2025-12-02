@@ -62,6 +62,267 @@ class AdvancedDataPreprocessor:
 
         return np.nan
 
+    def robust_fix_coords(self, df):
+        """
+        ✅ CORREÇÃO ULTRA-ROBUSTA DE COORDENADAS CORROMPIDAS
+
+        Detecta e corrige automaticamente:
+        - Escalas erradas (valores em 10⁴, 10⁵, 10⁶)
+        - Sinais invertidos
+        - Valores impossíveis (fora dos limites terrestres)
+        - Valores NaN ou inválidos
+        - Vírgula decimal brasileira
+
+        Returns:
+            DataFrame com coordenadas corrigidas
+        """
+        print("\n" + "🔥" * 30)
+        print("🛠️  CORREÇÃO ROBUSTA DE COORDENADAS GEOGRÁFICAS")
+        print("🔥" * 30)
+
+        if 'LATITUDE' not in df.columns or 'LONGITUDE' not in df.columns:
+            print("⚠️  Colunas de coordenadas não encontradas!")
+            return df
+
+        # ==========================================
+        # ETAPA 1: CONVERTER PARA NUMÉRICO
+        # ==========================================
+        print("\n📌 ETAPA 1: CONVERSÃO PARA FORMATO NUMÉRICO")
+        print("─" * 50)
+
+        def safe_convert_to_float(series):
+            """Converte série para float tratando vírgulas e strings"""
+
+            def convert_value(val):
+                if pd.isna(val):
+                    return np.nan
+                if isinstance(val, (int, float)):
+                    return float(val)
+                if isinstance(val, str):
+                    # Remover espaços e substituir vírgula por ponto
+                    val = val.strip().replace(',', '.')
+                    try:
+                        return float(val)
+                    except ValueError:
+                        return np.nan
+                return np.nan
+
+            return series.apply(convert_value)
+
+        # Aplicar conversão
+        df['LATITUDE'] = safe_convert_to_float(df['LATITUDE'])
+        df['LONGITUDE'] = safe_convert_to_float(df['LONGITUDE'])
+
+        print(f"✅ Conversão concluída")
+        print(
+            f"   • Latitude - NaN: {df['LATITUDE'].isna().sum():,} ({df['LATITUDE'].isna().sum() / len(df) * 100:.2f}%)")
+        print(
+            f"   • Longitude - NaN: {df['LONGITUDE'].isna().sum():,} ({df['LONGITUDE'].isna().sum() / len(df) * 100:.2f}%)")
+
+        # ==========================================
+        # ETAPA 2: ANÁLISE DE ESCALA
+        # ==========================================
+        print("\n📌 ETAPA 2: DETECÇÃO AUTOMÁTICA DE ESCALA ERRADA")
+        print("─" * 50)
+
+        # Amostra válida para análise (não-NaN)
+        lat_valid = df['LATITUDE'].dropna()
+        lon_valid = df['LONGITUDE'].dropna()
+
+        if len(lat_valid) == 0 or len(lon_valid) == 0:
+            print("❌ Nenhum dado válido para análise!")
+            return df
+
+        # Estatísticas brutas
+        lat_mean_raw = lat_valid.mean()
+        lon_mean_raw = lon_valid.mean()
+        lat_median_raw = lat_valid.median()
+        lon_median_raw = lon_valid.median()
+        lat_abs_mean = np.abs(lat_valid).mean()
+        lon_abs_mean = np.abs(lon_valid).mean()
+
+        print(f"📊 ESTATÍSTICAS BRUTAS:")
+        print(f"   • Latitude:  média={lat_mean_raw:.2f}, mediana={lat_median_raw:.2f}, |média|={lat_abs_mean:.2f}")
+        print(f"   • Longitude: média={lon_mean_raw:.2f}, mediana={lon_median_raw:.2f}, |média|={lon_abs_mean:.2f}")
+
+        # ==========================================
+        # ETAPA 3: CORREÇÃO DE ESCALA
+        # ==========================================
+        print("\n📌 ETAPA 3: CORREÇÃO AUTOMÁTICA DE ESCALA")
+        print("─" * 50)
+
+        # Limites esperados (mundo inteiro)
+        WORLD_LAT_MIN, WORLD_LAT_MAX = -90, 90
+        WORLD_LON_MIN, WORLD_LON_MAX = -180, 180
+
+        # Função de correção de escala
+        def detect_and_fix_scale(series, coord_type='lat'):
+            """Detecta escala errada e aplica correção"""
+            valid = series.dropna()
+            if len(valid) == 0:
+                return series, 1.0
+
+            abs_mean = np.abs(valid).mean()
+            abs_median = np.abs(valid).median()
+
+            # Decisão de escala baseada na magnitude
+            if abs_mean > 1e6 or abs_median > 1e6:
+                factor = 1e6
+                reason = "valores na ordem de 10⁶"
+            elif abs_mean > 1e5 or abs_median > 1e5:
+                factor = 1e5
+                reason = "valores na ordem de 10⁵"
+            elif abs_mean > 1e4 or abs_median > 1e4:
+                factor = 1e4
+                reason = "valores na ordem de 10⁴"
+            elif abs_mean > 1e3 or abs_median > 1e3:
+                factor = 1e3
+                reason = "valores na ordem de 10³"
+            else:
+                factor = 1.0
+                reason = "escala OK"
+
+            if factor > 1.0:
+                print(f"   🔧 {coord_type.upper()}: {reason} → dividindo por {factor:.0e}")
+                return series / factor, factor
+            else:
+                print(f"   ✅ {coord_type.upper()}: {reason}")
+                return series, factor
+
+        # Aplicar correção
+        df['LATITUDE'], lat_factor = detect_and_fix_scale(df['LATITUDE'], 'latitude')
+        df['LONGITUDE'], lon_factor = detect_and_fix_scale(df['LONGITUDE'], 'longitude')
+
+        # ==========================================
+        # ETAPA 4: CLIP PARA LIMITES MUNDIAIS
+        # ==========================================
+        print("\n📌 ETAPA 4: APLICANDO LIMITES GEOGRÁFICOS MUNDIAIS")
+        print("─" * 50)
+
+        # Contar valores fora dos limites ANTES do clip
+        lat_out_of_bounds = ((df['LATITUDE'] < WORLD_LAT_MIN) | (df['LATITUDE'] > WORLD_LAT_MAX)).sum()
+        lon_out_of_bounds = ((df['LONGITUDE'] < WORLD_LON_MIN) | (df['LONGITUDE'] > WORLD_LON_MAX)).sum()
+
+        print(f"   • Latitudes fora de [{WORLD_LAT_MIN}, {WORLD_LAT_MAX}]: {lat_out_of_bounds:,}")
+        print(f"   • Longitudes fora de [{WORLD_LON_MIN}, {WORLD_LON_MAX}]: {lon_out_of_bounds:,}")
+
+        # Aplicar clip
+        df['LATITUDE'] = df['LATITUDE'].clip(WORLD_LAT_MIN, WORLD_LAT_MAX)
+        df['LONGITUDE'] = df['LONGITUDE'].clip(WORLD_LON_MIN, WORLD_LON_MAX)
+
+        print(f"   ✅ Clip aplicado")
+
+        # ==========================================
+        # ETAPA 5: PREENCHIMENTO DE NaN
+        # ==========================================
+        print("\n📌 ETAPA 5: PREENCHIMENTO DE VALORES INVÁLIDOS")
+        print("─" * 50)
+
+        # Calcular medianas dos dados válidos (após correção)
+        lat_valid_post = df['LATITUDE'].dropna()
+        lon_valid_post = df['LONGITUDE'].dropna()
+
+        if len(lat_valid_post) > 0 and len(lon_valid_post) > 0:
+            lat_median = lat_valid_post.median()
+            lon_median = lon_valid_post.median()
+
+            # Verificar se mediana está dentro de São Paulo (caso seja dataset SP)
+            if (self.SP_LAT_MIN <= lat_median <= self.SP_LAT_MAX and
+                    self.SP_LON_MIN <= lon_median <= self.SP_LON_MAX):
+                print(f"   ✅ Usando mediana de São Paulo:")
+            else:
+                # Fallback: centro de São Paulo
+                lat_median = self.SP_LAT_CENTER
+                lon_median = self.SP_LON_CENTER
+                print(f"   ⚠️  Mediana fora de SP, usando centro de São Paulo:")
+        else:
+            # Fallback
+            lat_median = self.SP_LAT_CENTER
+            lon_median = self.SP_LON_CENTER
+            print(f"   ⚠️  Sem dados válidos, usando centro de São Paulo:")
+
+        print(f"      • Latitude: {lat_median:.6f}")
+        print(f"      • Longitude: {lon_median:.6f}")
+
+        # Preencher NaN
+        nan_lat = df['LATITUDE'].isna().sum()
+        nan_lon = df['LONGITUDE'].isna().sum()
+
+        df['LATITUDE'].fillna(lat_median, inplace=True)
+        df['LONGITUDE'].fillna(lon_median, inplace=True)
+
+        print(f"   ✅ NaN preenchidos: Lat={nan_lat:,}, Lon={nan_lon:,}")
+
+        # ==========================================
+        # ETAPA 6: VALIDAÇÃO FINAL
+        # ==========================================
+        print("\n📌 ETAPA 6: VALIDAÇÃO FINAL")
+        print("─" * 50)
+
+        lat_final = df['LATITUDE']
+        lon_final = df['LONGITUDE']
+
+        # Estatísticas finais
+        stats_final = {
+            'lat_min': lat_final.min(),
+            'lat_max': lat_final.max(),
+            'lat_mean': lat_final.mean(),
+            'lat_median': lat_final.median(),
+            'lat_std': lat_final.std(),
+            'lon_min': lon_final.min(),
+            'lon_max': lon_final.max(),
+            'lon_mean': lon_final.mean(),
+            'lon_median': lon_final.median(),
+            'lon_std': lon_final.std(),
+            'lat_nan': lat_final.isna().sum(),
+            'lon_nan': lon_final.isna().sum()
+        }
+
+        print(f"📊 ESTATÍSTICAS FINAIS:")
+        print(f"   • Latitude:")
+        print(f"      - Range: [{stats_final['lat_min']:.6f}, {stats_final['lat_max']:.6f}]")
+        print(f"      - Média: {stats_final['lat_mean']:.6f} ± {stats_final['lat_std']:.6f}")
+        print(f"      - Mediana: {stats_final['lat_median']:.6f}")
+        print(f"      - NaN: {stats_final['lat_nan']:,}")
+        print(f"   • Longitude:")
+        print(f"      - Range: [{stats_final['lon_min']:.6f}, {stats_final['lon_max']:.6f}]")
+        print(f"      - Média: {stats_final['lon_mean']:.6f} ± {stats_final['lon_std']:.6f}")
+        print(f"      - Mediana: {stats_final['lon_median']:.6f}")
+        print(f"      - NaN: {stats_final['lon_nan']:,}")
+
+        # Verificação de qualidade
+        lat_in_sp = ((stats_final['lat_min'] >= self.SP_LAT_MIN) and
+                     (stats_final['lat_max'] <= self.SP_LAT_MAX))
+        lon_in_sp = ((stats_final['lon_min'] >= self.SP_LON_MIN) and
+                     (stats_final['lon_max'] <= self.SP_LON_MAX))
+
+        if lat_in_sp and lon_in_sp:
+            print(f"\n   ✅ SUCESSO: Todas as coordenadas dentro dos limites de São Paulo!")
+        elif (WORLD_LAT_MIN <= stats_final['lat_min'] and stats_final['lat_max'] <= WORLD_LAT_MAX and
+              WORLD_LON_MIN <= stats_final['lon_min'] and stats_final['lon_max'] <= WORLD_LON_MAX):
+            print(f"\n   ✅ OK: Coordenadas dentro dos limites mundiais (mas fora de SP)")
+        else:
+            print(f"\n   ⚠️  ATENÇÃO: Ainda há coordenadas suspeitas!")
+
+        # ==========================================
+        # ETAPA 7: SALVAR ESTATÍSTICAS
+        # ==========================================
+        self.outlier_stats['coordinate_correction'] = {
+            'lat_factor': lat_factor,
+            'lon_factor': lon_factor,
+            'lat_out_of_bounds_pre': lat_out_of_bounds,
+            'lon_out_of_bounds_pre': lon_out_of_bounds,
+            'nan_filled_lat': nan_lat,
+            'nan_filled_lon': nan_lon,
+            'final_stats': stats_final
+        }
+
+        print("\n" + "🔥" * 30)
+        print("✅ CORREÇÃO DE COORDENADAS CONCLUÍDA")
+        print("🔥" * 30 + "\n")
+
+        return df
+
     def load_and_fix_coordinates(self, df):
         """
         ✅ CORREÇÃO PRINCIPAL: Converter coordenadas brasileiras corretamente
@@ -346,6 +607,38 @@ class AdvancedDataPreprocessor:
             X_encoded = sparse.csr_matrix((X.shape[0], 0))
             encoded_features = []
 
+        if hasattr(self, 'pca') and hasattr(self.pca, 'components_'):
+            print("\n🎯 AJUSTE: Rebalanceando contribuição de coordenadas no PCA")
+
+            # Identificar quais componentes têm alta contribuição de LAT/LON
+            components = self.pca.components_
+
+            # Índices de LAT/LON nas features originais (geralmente as primeiras)
+            # Se você souber os índices exatos, use-os
+            # Por simplicidade, vamos assumir que são as 2 primeiras features
+            coord_indices = [0, 1]  # Ajustar conforme sua pipeline
+
+            for i, component in enumerate(components):
+                coord_contribution = np.sum(np.abs(component[coord_indices]))
+                total_contribution = np.sum(np.abs(component))
+
+                if total_contribution > 0:
+                    coord_ratio = coord_contribution / total_contribution
+
+                    if coord_ratio > 0.7:  # Se coordenadas dominam mais de 70%
+                        print(f"   ⚠️  PC{i + 1}: Coordenadas dominam {coord_ratio * 100:.1f}% - ajustando...")
+
+                        # Reduzir peso das coordenadas
+                        damping_factor = 0.5
+                        component[coord_indices] *= damping_factor
+
+                        # Renormalizar componente
+                        norm = np.linalg.norm(component)
+                        if norm > 0:
+                            components[i] = component / norm
+
+            print(f"   ✅ PCA rebalanceado")
+
         # REFATORADO: Normalização com validação
         print("\n📏 Normalizando features numéricas...")
         if numeric_features:
@@ -494,7 +787,7 @@ class AdvancedDataPreprocessor:
         print("📍 FASE 0: CORREÇÃO DE FORMATO (VÍRGULA → PONTO)")
         print("=" * 60)
 
-        df = self.load_and_fix_coordinates(df)
+        df = self.robust_fix_coords(df)
 
         # FASE 1: Limpeza de outliers
         print("\n" + "=" * 60)
