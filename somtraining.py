@@ -60,6 +60,7 @@ class ClusterQualityEvaluator:
 
         try:
             # 1. Métricas de Coesão e Separação
+
             metrics['silhouette_score'] = silhouette_score(valid_data, valid_clusters)
             metrics['calinski_harabasz'] = calinski_harabasz_score(valid_data, valid_clusters)
             metrics['davies_bouldin'] = davies_bouldin_score(valid_data, valid_clusters)

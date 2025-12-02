@@ -289,7 +289,7 @@ class AdvancedDataPreprocessor:
         return features_df
 
     def smart_encoding(self, features_df):
-        """Codificação inteligente de features"""
+        """Codificação inteligente de features - REFATORADO"""
         print("\n🔠 PREPARAÇÃO DE FEATURES PARA CLUSTERING")
         print("=" * 50)
 
@@ -327,24 +327,31 @@ class AdvancedDataPreprocessor:
                 median_val = X[col].median()
                 X[col] = X[col].fillna(median_val)
 
-        # One-Hot Encoding
+        # REFATORADO: One-Hot Encoding com validação
         print("\n🎯 Aplicando One-Hot Encoding...")
         if categorical_features:
             try:
-                X_encoded = self.encoder.fit_transform(X[categorical_features])
+                # Preparar dados categóricos para encoding
+                X_categorical = X[categorical_features]
+
+                # Fit e transform
+                X_encoded = self.encoder.fit_transform(X_categorical)
                 encoded_features = self.encoder.get_feature_names_out(categorical_features)
                 print(f"   • {len(categorical_features)} categóricas → {len(encoded_features)} colunas")
             except Exception as e:
                 print(f"⚠️  Erro no encoding: {e}")
                 X_encoded = sparse.csr_matrix((X.shape[0], 0))
+                encoded_features = []
         else:
             X_encoded = sparse.csr_matrix((X.shape[0], 0))
+            encoded_features = []
 
-        # Normalizar numéricas
+        # REFATORADO: Normalização com validação
         print("\n📏 Normalizando features numéricas...")
         if numeric_features:
             try:
-                X_scaled = self.scaler.fit_transform(X[numeric_features])
+                X_numeric = X[numeric_features]
+                X_scaled = self.scaler.fit_transform(X_numeric)
                 X_scaled = sparse.csr_matrix(X_scaled)
                 print(f"   • {len(numeric_features)} features normalizadas")
             except Exception as e:
@@ -353,13 +360,36 @@ class AdvancedDataPreprocessor:
         else:
             X_scaled = sparse.csr_matrix((X.shape[0], 0))
 
-        # Combinar
+        # REFATORADO: Combinar features com verificação de compatibilidade
         print("\n🔗 Combinando features...")
-        X_combined = sparse.hstack([X_scaled, X_encoded], format='csr')
-        X_dense = X_combined.toarray()
-        print(f"✅ Features combinadas: {X_dense.shape}")
+        try:
+            # Verificar se as matrizes têm o mesmo número de linhas
+            if X_scaled.shape[0] != X_encoded.shape[0]:
+                print("❌ Número de linhas incompatível!")
+                print(f"   X_scaled: {X_scaled.shape}")
+                print(f"   X_encoded: {X_encoded.shape}")
+                # Alinhar truncando para o menor
+                min_rows = min(X_scaled.shape[0], X_encoded.shape[0])
+                if min_rows > 0:
+                    X_scaled = X_scaled[:min_rows]
+                    X_encoded = X_encoded[:min_rows]
+                    print(f"   ⚠️  Truncado para {min_rows} linhas")
+                else:
+                    return pd.DataFrame()
 
-        # PCA se necessário
+            # Combinar as matrizes esparsas
+            X_combined = sparse.hstack([X_scaled, X_encoded], format='csr')
+            print(f"✅ Features combinadas: {X_combined.shape}")
+
+            # Converter para denso
+            X_dense = X_combined.toarray()
+            print(f"✅ Matriz densa criada: {X_dense.shape}")
+
+        except Exception as e:
+            print(f"❌ Erro ao combinar features: {e}")
+            return pd.DataFrame()
+
+        # REFATORADO: PCA com tratamento de erro
         if X_dense.shape[1] > 20:
             print("\n🎯 Reduzindo dimensionalidade com PCA...")
             try:
@@ -372,8 +402,15 @@ class AdvancedDataPreprocessor:
 
                 feature_names = [f'PC{i + 1}' for i in range(n_components)]
                 X_final = pd.DataFrame(X_pca, columns=feature_names, index=X.index)
+
+                # Salvar contribuições PCA
+                self.pca_contributions = self.get_feature_contributions_from_pca()
+                joblib.dump(self.pca_contributions, 'pca_feature_contributions.pkl')
+                print("   💾 Contribuições PCA salvas")
+
             except Exception as e:
                 print(f"⚠️  Erro no PCA: {e}")
+                # Fallback: usar matriz densa original
                 feature_names = [f'Feature_{i}' for i in range(X_dense.shape[1])]
                 X_final = pd.DataFrame(X_dense, columns=feature_names, index=X.index)
         else:
@@ -384,8 +421,45 @@ class AdvancedDataPreprocessor:
         print(f"\n✅ DATASET FINAL: {X_final.shape}")
         return X_final
 
+    def get_feature_contributions_from_pca(self):
+        """
+        Retorna contribuição de features originais em cada componente principal
+        """
+        if not hasattr(self.pca, 'components_'):
+            print("⚠️  PCA não foi ajustado ainda")
+            return None
+
+        # Componentes do PCA (n_components x n_features)
+        components = self.pca.components_
+
+        # Variância explicada por cada PC
+        explained_var = self.pca.explained_variance_ratio_
+
+        # Criar DataFrame legível
+        feature_names = [f'Feature_{i}' for i in range(components.shape[1])]
+
+        contributions_df = pd.DataFrame(
+            components.T,  # Transpor: features nas linhas
+            columns=[f'PC{i + 1}' for i in range(components.shape[0])],
+            index=feature_names
+        )
+
+        # Adicionar variância explicada
+        contributions_df.loc['Explained_Variance'] = explained_var
+
+        print("\n📊 TOP 5 FEATURES POR COMPONENTE PRINCIPAL:")
+        for pc in contributions_df.columns:
+            if pc == 'Explained_Variance':
+                continue
+            top_features = contributions_df[pc].abs().nlargest(5)
+            print(f"\n{pc} ({explained_var[int(pc[2:]) - 1] * 100:.1f}% variância):")
+            for feat, val in top_features.items():
+                print(f"   • {feat}: {val:.3f}")
+
+        return contributions_df
+
     def full_pipeline(self, csv_path, sample_frac=None):
-        """Pipeline completo com correção de formato brasileiro"""
+        """Pipeline completo com correção de formato brasileiro - REFATORADO"""
         print("\n" + "=" * 60)
         print("🚀 PIPELINE DE PRÉ-PROCESSAMENTO PARA CLUSTERING")
         print("=" * 60)
@@ -477,7 +551,7 @@ class AdvancedDataPreprocessor:
             artifacts = {
                 'scaler': self.scaler,
                 'encoder': self.encoder,
-                'pca': self.pca,
+                'pca': self.pca if hasattr(self.pca, 'components_') else None,
                 'geo_scaler': self.geo_scaler,
                 'feature_info': self.feature_info,
                 'outlier_stats': self.outlier_stats

@@ -296,6 +296,47 @@ class MemoryEfficientSOMTrainer:
             logger.error(f"Erro: {e}")
             raise
 
+    def plot_training_convergence(self, save_path='som_convergence.png'):
+        """
+        Visualiza evolução das métricas de erro durante treinamento
+        """
+        import matplotlib.pyplot as plt
+
+        if not self.training_history['q_error']:
+            logger.warning("Nenhum histórico de treinamento disponível")
+            return
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        iterations = range(0, len(self.training_history['q_error']))
+
+        # Quantization Error
+        ax1.plot(iterations, self.training_history['q_error'],
+                 marker='o', linewidth=2, color='steelblue')
+        ax1.set_title('Convergência: Quantization Error', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('Checkpoint (iterações)')
+        ax1.set_ylabel('QE')
+        ax1.grid(True, alpha=0.3)
+
+        # Topographic Error
+        ax2.plot(iterations, self.training_history['t_error'],
+                 marker='s', linewidth=2, color='coral')
+        ax2.set_title('Convergência: Topographic Error', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('Checkpoint (iterações)')
+        ax2.set_ylabel('TE')
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"📊 Gráfico de convergência salvo: {save_path}")
+
+    # CHAMAR NO FINAL DO TREINAMENTO (linha ~286):
+    # Após: self.som = som
+    # Adicionar:
+        self.plot_training_convergence()
+
     def fallback_training(self, data: np.ndarray):
         """Fallback com configuração reduzida"""
         logger.info("⚠️  USANDO CONFIGURAÇÃO FALLBACK")
